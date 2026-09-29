@@ -20,13 +20,10 @@ jobs:
           tar -xJf /tmp/omnichat-src.tar.xz
       - name: Publish regular source files
         shell: bash
-        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -r --ignore-unmatch bootstrap
-          git rm --ignore-unmatch .github/workflows/bootstrap-build.yml
-          git add -A
+          git add -- README.md .gitignore settings.gradle build.gradle gradle.properties app
           if ! git diff --cached --quiet; then
             git commit -m "Import OmniChat Android source [skip ci]"
             git push origin HEAD:main
@@ -35,12 +32,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
       - name: Install Android SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Build debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
       - uses: actions/upload-artifact@v4
