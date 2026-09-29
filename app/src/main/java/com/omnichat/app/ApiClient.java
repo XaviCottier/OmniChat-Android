@@ -238,7 +238,10 @@ final class ApiClient {
         String headers = p.optString("headers", "");
         if (!headers.isEmpty()) {
             JSONObject custom = new JSONObject(headers);
-            for (String h : custom.keySet()) c.setRequestProperty(h, custom.optString(h).replace("${API_KEY}", key));
+            for (java.util.Iterator<String> it = custom.keys(); it.hasNext();) {
+                String h = it.next();
+                c.setRequestProperty(h, custom.optString(h).replace("${API_KEY}", key));
+            }
         }
         return c;
     }
