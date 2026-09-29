@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#0b0e1a">
+  <title>OmniChat</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <div id="shade" class="shade hidden"></div>
+  <aside id="sidebar" class="sidebar">
+    <div class="side-header"><div class="logo">◎</div><div><b>OmniChat</b><small>Tu IA. Tus proveedores.</small></div><button id="closeSidebar" class="icon mobile-only" aria-label="Cerrar">×</button></div>
+    <button id="newChat" class="primary full">＋ Nueva conversación</button>
+    <div class="side-section"><span>CONVERSACIONES</span><button id="addProviderSide" class="subtle">＋ Proveedor</button></div>
+    <div id="chatList" class="chat-list"></div>
+    <div class="side-bottom"><span class="tiny-dot"></span>Conexión directa · Datos cifrados en el dispositivo</div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <button id="openSidebar" class="icon mobile-only" aria-label="Menú">☰</button>
+      <div class="top-copy"><b id="chatTitle">Nuevo chat</b><small>Chat multimodelo</small></div>
+      <div class="top-actions"><button id="addProvider" class="icon" title="Proveedores">⚙</button><button id="export" class="icon" title="Compartir conversación">⇧</button></div>
+    </header>
+    <div class="modelbar">
+      <div class="selector"><label for="providerSelect">PROVEEDOR</label><select id="providerSelect"><option value="">Selecciona proveedor</option></select></div>
+      <div class="selector model-selector"><label for="modelInput">MODELO</label><div class="model-row"><input id="modelInput" list="modelList" placeholder="ID del modelo" autocomplete="off" spellcheck="false"><datalist id="modelList"></datalist><button id="loadModels" class="refresh" title="Consultar catálogo de modelos">↻</button></div></div>
+    </div>
+    <div id="notice" class="notice hidden" role="status"></div>
+    <section id="messages" class="messages" aria-live="polite">
+      <div id="empty" class="empty"><div class="hero-mark">✧</div><h1>Una app. Cualquier modelo.</h1><p>Configura un proveedor y empieza a hablar con su IA. Cambia de modelo cuando quieras, sin perder el chat.</p><button id="emptyAdd" class="primary">Conectar proveedor →</button></div>
+    </section>
+    <div class="composer-zone">
+      <div id="options" class="options hidden"><label>Instrucción del sistema<textarea id="systemPrompt" rows="3" placeholder="Eres un asistente útil..."></textarea></label><div class="option-grid"><label>Temperatura<input id="temperature" type="number" value="0.7" min="0" max="2" step="0.1"></label><label>Máx. tokens<input id="maxTokens" type="number" value="2048" min="1" max="32768"></label></div></div>
+      <div class="composer"><textarea id="prompt" rows="1" placeholder="Escribe un mensaje…" aria-label="Mensaje"></textarea><div class="composer-bottom"><button id="toggleOptions" class="subtle">⚙ Ajustes</button><span id="counter">Enter ↵ para enviar</span><button id="send" class="send" aria-label="Enviar">↑</button><button id="stop" class="stop hidden" aria-label="Detener">■</button></div></div>
+      <div class="footer-note">Las respuestas y tarifas dependen del proveedor y modelo seleccionado.</div>
+    </div>
+  </main>
+</div>
+<div id="providerModal" class="modal-wrap hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal">
+    <div class="modal-title"><div><small>CONEXIÓN API</small><h2 id="modalTitle">Nuevo proveedor</h2></div><button id="closeModal" class="icon" aria-label="Cerrar">×</button></div>
+    <div class="modal-scroll"><button id="freshProvider" class="subtle fresh" type="button">＋ Añadir otra conexión</button>
+      <label>Plantilla rápida<select id="preset"><option value="">Personalizado</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="groq">Groq</option><option value="cerebras">Cerebras</option><option value="mistral">Mistral</option><option value="together">Together AI</option><option value="anthropic">Anthropic / Claude API</option><option value="gemini">Google Gemini API</option><option value="ollama">Ollama local</option></select></label>
+      <label>Nombre<input id="pName" placeholder="Mi proveedor"></label>
+      <label>Protocolo<select id="pAdapter"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama</option></select></label>
+      <label>URL base<input id="pBase" type="url" spellcheck="false" placeholder="https://api.ejemplo.com/v1"></label>
+      <label>API key / token<input id="pKey" type="password" autocomplete="off" spellcheck="false" placeholder="Pegar clave (guardada cifrada)"></label>
+      <p id="keyHint" class="hint">Una clave vacía deja la anterior sin cambios. Se guarda cifrada mediante Android Keystore.</p>
+      <label class="checkline"><input type="checkbox" id="clearKey"> Quitar clave guardada</label>
+      <label>Modelo predeterminado (opcional)<input id="pModel" spellcheck="false" placeholder="Ej. openai/gpt-oss-20b"></label>
+      <details><summary>Opciones avanzadas</summary>
+        <label>Autenticación<select id="pAuth"><option value="auto">Automática según protocolo</option><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option><option value="none">Solo cabeceras personalizadas / sin auth</option></select></label>
+        <label class="checkline"><input type="checkbox" id="pStream" checked> Respuesta en streaming</label>
+        <label class="checkline"><input type="checkbox" id="pTemperature" checked> Enviar parámetro temperature</label>
+        <label>Campo de límite de tokens (OpenAI-compatible)<select id="pTokenField"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option><option value="none">No enviar límite</option></select></label>
+        <label>Ruta de modelos (opcional)<input id="pModelsPath" placeholder="/models"></label>
+        <label>Ruta de chat (OpenAI-compatible)<input id="pChatPath" placeholder="/chat/completions"></label>
+        <label>Cabeceras JSON (opcional)<textarea id="pHeaders" rows="3" spellcheck="false" placeholder='{"X-Custom-Header":"valor"}'></textarea></label>
+        <p class="hint">Las cabeceras existentes se conservan si dejas este campo vacío. Admite ${API_KEY}. Nunca se envían credenciales por HTTP.</p>
+        <label class="checkline"><input type="checkbox" id="clearHeaders"> Quitar cabeceras guardadas</label>
+      </details>
+      <p class="hint">Usa una clave de API creada en la cuenta del proveedor. Un plan de suscripción web no equivale necesariamente a acceso a API.</p>
+    </div>
+    <div class="modal-buttons"><button id="deleteProvider" class="danger hidden">Eliminar</button><button id="saveProvider" class="primary">Guardar conexión</button></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
