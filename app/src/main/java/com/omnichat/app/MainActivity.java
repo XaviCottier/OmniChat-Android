@@ -128,8 +128,11 @@ public class MainActivity extends Activity {
         String headers = p.optString("headers", "").trim();
         if (!headers.isEmpty()) {
             JSONObject h = new JSONObject(headers);
-            for (String k : h.keySet()) if (k.contains("\n") || k.contains("\r") || h.optString(k).contains("\n") || h.optString(k).contains("\r"))
-                throw new IllegalArgumentException("Invalid header");
+            for (java.util.Iterator<String> it = h.keys(); it.hasNext();) {
+                String k = it.next();
+                if (k.contains("\n") || k.contains("\r") || h.optString(k).contains("\n") || h.optString(k).contains("\r"))
+                    throw new IllegalArgumentException("Invalid header");
+            }
         }
     }
     private class Bridge {
