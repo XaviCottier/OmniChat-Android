@@ -1,4 +1,4 @@
-name: Build Lumenfield V4 Android Native
+name: Build Lumenfield V4 Original Android
 on:
   push:
     branches: [lumenfield-v4-android-build]
@@ -29,11 +29,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          TAG="lumenfield-v4-native-v3"
+          TAG="lumenfield-v4-original-android-v4"
           gh release delete "$TAG" --cleanup-tag -y >/dev/null 2>&1 || true
-          gh release create "$TAG"             app/build/outputs/apk/debug/app-debug.apk#ARCHIE-Lumenfield-V4-Android-Native.apk             --title "ARCHIE Lumenfield V4 Android Native"             --notes "Standalone Android build. Native renderer, integrated demo, immersive system bars, no external ZIP or folder required."             --target "${GITHUB_SHA}"
+          gh release create "$TAG"             app/build/outputs/apk/debug/app-debug.apk#ARCHIE-Lumenfield-V4-Original-Android.apk             --title "ARCHIE Lumenfield V4 Original Android"             --notes "Android wrapper for the original Lumenfield V4 frontend. Automatically imports etapa-02-navegacion.zip from Downloads, loads integrated demo by default, supports Android SAF folder selection, and uses immersive mode."             --target "${GITHUB_SHA}"
       - uses: actions/upload-artifact@v4
         with:
-          name: ARCHIE-Lumenfield-V4-Android-Native
+          name: ARCHIE-Lumenfield-V4-Original-Android
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
