@@ -230,8 +230,12 @@ public class MainActivity extends Activity {
             running = true;
             pool.execute(() -> {
                 while (running) {
-                    try { pool.execute(() -> handle(socket.accept())); }
-                    catch (Exception e) { if (running) e.printStackTrace(); }
+                    try {
+                        Socket accepted = socket.accept();
+                        pool.execute(() -> handle(accepted));
+                    } catch (Exception e) {
+                        if (running) e.printStackTrace();
+                    }
                 }
             });
         }
