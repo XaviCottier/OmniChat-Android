@@ -54,7 +54,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        webRoot = new File(getFilesDir(), "lumenfield-v4-web");
+        webRoot = new File(getFilesDir(), "lumenfield-v4-original-v5");
         applyImmersive();
         File index = new File(webRoot, "index.html");
         if (index.isFile()) {
@@ -104,17 +104,28 @@ public class MainActivity extends Activity {
     }
 
     private void beginAutomaticBootstrap() {
-        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
-            showPermissionScreen();
-            try {
-                Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                        Uri.parse("package:" + getPackageName()));
-                startActivityForResult(i, MANAGE_FILES);
-            } catch (Exception e) {
-                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-            }
-        } else {
+        showPermissionScreen();
+        if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+            status.setText("Permiso listo. Buscando interfaz V4 original…");
+            status.postDelayed(this::startAutomaticImport, 250);
+        }
+    }
+
+    private void requestFileAccess() {
+        if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
             startAutomaticImport();
+            return;
+        }
+        try {
+            Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivityForResult(i, MANAGE_FILES);
+        } catch (Exception e) {
+            try {
+                startActivityForResult(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION), MANAGE_FILES);
+            } catch (Exception ignored) {
+                if (status != null) status.setText("Android no abrió el permiso. Usa ELEGIR ZIP V4 como respaldo.");
+            }
         }
     }
 
@@ -135,13 +146,26 @@ public class MainActivity extends Activity {
         info.setTextSize(14);
         info.setGravity(android.view.Gravity.CENTER);
         info.setPadding(0,20,0,24);
+        Button grant = new Button(this);
+        grant.setText("AUTORIZAR ARCHIVOS Y ABRIR");
+        grant.setOnClickListener(v -> requestFileAccess());
+
+        Button fallback = new Button(this);
+        fallback.setText("ELEGIR ZIP V4 (RESPALDO)");
+        fallback.setOnClickListener(v -> pickZip());
+
         status = new TextView(this);
-        status.setText("Esperando permiso de Android…");
+        status.setText(Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()
+                ? "Toca AUTORIZAR. Android abrirá el permiso de archivos."
+                : "Permiso listo. Preparando V4…");
         status.setTextColor(Color.rgb(80,220,190));
         status.setTextSize(12);
         status.setGravity(android.view.Gravity.CENTER);
+        status.setPadding(0,18,0,0);
         root.addView(title,new LinearLayout.LayoutParams(-1,-2));
         root.addView(info,new LinearLayout.LayoutParams(-1,-2));
+        root.addView(grant,new LinearLayout.LayoutParams(-1,-2));
+        root.addView(fallback,new LinearLayout.LayoutParams(-1,-2));
         root.addView(status,new LinearLayout.LayoutParams(-1,-2));
         setContentView(root);
     }
