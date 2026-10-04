@@ -1,9 +1,9 @@
-name: Build Lumenfield V4 Android Demo
+name: Build Lumenfield V4 Android Native
 on:
   push:
     branches: [lumenfield-v4-android-build]
 permissions:
-  contents: read
+  contents: write
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -24,8 +24,16 @@ jobs:
           "$SDKMGR" 'platforms;android-35' 'build-tools;35.0.0'
       - name: Build APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Publish direct APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="lumenfield-v4-native-v3"
+          gh release delete "$TAG" --cleanup-tag -y >/dev/null 2>&1 || true
+          gh release create "$TAG"             app/build/outputs/apk/debug/app-debug.apk#ARCHIE-Lumenfield-V4-Android-Native.apk             --title "ARCHIE Lumenfield V4 Android Native"             --notes "Standalone Android build. Native renderer, integrated demo, immersive system bars, no external ZIP or folder required."             --target "${GITHUB_SHA}"
       - uses: actions/upload-artifact@v4
         with:
-          name: ARCHIE-Lumenfield-V4-Android-Standalone
+          name: ARCHIE-Lumenfield-V4-Android-Native
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
