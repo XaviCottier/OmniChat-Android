@@ -1,421 +1,914 @@
 package com.lumenfield.viewer;
 
 import android.app.Activity;
-import android.graphics.*;
-import android.os.*;
-import android.view.*;
-import android.content.*;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
+import android.provider.DocumentsContract;
+import android.database.Cursor;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.graphics.Color;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class MainActivity extends Activity {
-    private LumenView view;
+    private static final int PICK_ZIP = 4004;
+    private static final int PICK_FOLDER = 5005;
+    private static final int MANAGE_FILES = 6006;
+    private File webRoot;
+    private WebView webView;
+    private LocalServer server;
+    private TextView status;
+    private volatile boolean bootstrapping = false;
+    private volatile boolean importRunning = false;
+    private volatile CountDownLatch folderPickLatch;
+    private volatile Uri selectedTreeUri;
+    private volatile boolean folderPickCancelled = false;
 
-    @Override public void onCreate(Bundle b) {
-        super.onCreate(b);
+    @Override public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        view = new LumenView(this);
-        setContentView(view);
-        immersive();
+        webRoot = new File(getFilesDir(), "lumenfield-v4-web");
+        applyImmersive();
+        File index = new File(webRoot, "index.html");
+        if (index.isFile()) {
+            launchViewer();
+        } else {
+            bootstrapping = true;
+            beginAutomaticBootstrap();
+        }
     }
 
-    private void immersive() {
+    private void applyImmersive() {
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
-            WindowInsetsController c = getWindow().getInsetsController();
-            if (c != null) {
-                c.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-                c.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            WindowInsetsController ctl = getWindow().getInsetsController();
+            if (ctl != null) {
+                ctl.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                ctl.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
             }
         } else {
             getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
-                View.SYSTEM_UI_FLAG_FULLSCREEN |
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                    View.SYSTEM_UI_FLAG_FULLSCREEN |
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             );
         }
     }
 
-    @Override public void onWindowFocusChanged(boolean f) {
-        super.onWindowFocusChanged(f);
-        if (f) {
-            immersive();
-            if (view != null) view.postDelayed(this::immersive, 250);
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            applyImmersive();
+            if (webView != null) webView.postDelayed(this::applyImmersive, 250);
         }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        applyImmersive();
+        if (bootstrapping && !new File(webRoot, "index.html").isFile()) {
+            if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                startAutomaticImport();
+            }
+        }
+    }
+
+    private void beginAutomaticBootstrap() {
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            showPermissionScreen();
+            try {
+                Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:" + getPackageName()));
+                startActivityForResult(i, MANAGE_FILES);
+            } catch (Exception e) {
+                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+            }
+        } else {
+            startAutomaticImport();
+        }
+    }
+
+    private void showPermissionScreen() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(android.view.Gravity.CENTER);
+        root.setPadding(40,40,40,40);
+        root.setBackgroundColor(Color.rgb(7,10,16));
+        TextView title = new TextView(this);
+        title.setText("ARCHIE LUMENFIELD V4");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(24);
+        title.setGravity(android.view.Gravity.CENTER);
+        TextView info = new TextView(this);
+        info.setText("\nAutoriza acceso a archivos una vez.\nLa app detectará etapa-02-navegacion.zip en Descargas automáticamente y guardará la interfaz V4 original dentro de la app.");
+        info.setTextColor(Color.rgb(150,170,190));
+        info.setTextSize(14);
+        info.setGravity(android.view.Gravity.CENTER);
+        info.setPadding(0,20,0,24);
+        status = new TextView(this);
+        status.setText("Esperando permiso de Android…");
+        status.setTextColor(Color.rgb(80,220,190));
+        status.setTextSize(12);
+        status.setGravity(android.view.Gravity.CENTER);
+        root.addView(title,new LinearLayout.LayoutParams(-1,-2));
+        root.addView(info,new LinearLayout.LayoutParams(-1,-2));
+        root.addView(status,new LinearLayout.LayoutParams(-1,-2));
+        setContentView(root);
+    }
+
+    private void startAutomaticImport() {
+        if (importRunning || new File(webRoot,"index.html").isFile()) return;
+        importRunning = true;
+        showImporter();
+        if (status != null) status.setText("Buscando etapa-02-navegacion.zip en Descargas…");
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                File zip = findSourceZip();
+                if (zip == null) throw new FileNotFoundException("No encontré etapa-02-navegacion.zip en Download/Descargas");
+                runOnUiThread(() -> { if (status != null) status.setText("Extrayendo interfaz V4 original…"); });
+                importZip(zip);
+                bootstrapping = false;
+                runOnUiThread(this::launchViewer);
+            } catch (Exception e) {
+                importRunning = false;
+                runOnUiThread(() -> {
+                    showImporter();
+                    if (status != null) status.setText("No pude importar automáticamente: " + e.getMessage() + "\nPuedes usar ELEGIR ZIP V4 (RESPALDO) como respaldo.");
+                });
+            }
+        });
+    }
+
+    private File findSourceZip() {
+        ArrayList<File> dirs = new ArrayList<>();
+        dirs.add(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS));
+        dirs.add(new File("/storage/emulated/0/Download"));
+        dirs.add(new File("/storage/emulated/0/Downloads"));
+        String[] exact = {"etapa-02-navegacion.zip","Etapa-02-navegacion.zip"};
+        for (File d : dirs) {
+            if (d == null || !d.isDirectory()) continue;
+            for (String n : exact) {
+                File f = new File(d,n);
+                if (f.isFile()) return f;
+            }
+            File[] fs = d.listFiles();
+            if (fs != null) for (File f : fs) {
+                String n=f.getName().toLowerCase(Locale.ROOT);
+                if (f.isFile() && n.endsWith(".zip") && n.contains("etapa-02") && n.contains("navegacion")) return f;
+            }
+        }
+        return null;
+    }
+
+    private void showImporter() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(android.view.Gravity.CENTER);
+        root.setPadding(40, 40, 40, 40);
+        root.setBackgroundColor(Color.rgb(7, 10, 16));
+
+        TextView title = new TextView(this);
+        title.setText("ARCHIE LUMENFIELD V4\nANDROID DEMO");
+        title.setTextColor(Color.rgb(225, 235, 245));
+        title.setTextSize(24);
+        title.setGravity(android.view.Gravity.CENTER);
+
+        TextView info = new TextView(this);
+        info.setText("\nLa app usa la interfaz V4 original.\nIntenta detectar etapa-02-navegacion.zip automáticamente; este botón queda solo como respaldo.");
+        info.setTextColor(Color.rgb(150, 170, 190));
+        info.setTextSize(15);
+        info.setGravity(android.view.Gravity.CENTER);
+        info.setPadding(0, 20, 0, 30);
+
+        Button b = new Button(this);
+        b.setText("ELEGIR ZIP V4");
+        b.setOnClickListener(v -> pickZip());
+
+        status = new TextView(this);
+        status.setText("");
+        status.setTextColor(Color.rgb(80, 220, 190));
+        status.setTextSize(13);
+        status.setGravity(android.view.Gravity.CENTER);
+        status.setPadding(0, 24, 0, 0);
+
+        root.addView(title, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(info, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(b, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(status, new LinearLayout.LayoutParams(-1, -2));
+        setContentView(root);
+    }
+
+    private void pickZip() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/zip");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip","application/octet-stream","application/x-zip-compressed"});
+        startActivityForResult(i, PICK_ZIP);
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == MANAGE_FILES) {
+            applyImmersive();
+            if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) startAutomaticImport();
+            return;
+        }
+
+        if (requestCode == PICK_FOLDER) {
+            folderPickCancelled = true;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri uri = data.getData();
+                int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                try { getContentResolver().takePersistableUriPermission(uri, flags | Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignored) {}
+                selectedTreeUri = uri;
+                folderPickCancelled = false;
+                try {
+                    if (server != null) server.loadSafTree(uri);
+                } catch (Exception e) {
+                    folderPickCancelled = true;
+                }
+            }
+            CountDownLatch latch = folderPickLatch;
+            if (latch != null) latch.countDown();
+            applyImmersive();
+            return;
+        }
+
+        if (requestCode != PICK_ZIP || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        if (status != null) status.setText("Extrayendo build V4 original…");
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                importZip(uri);
+                bootstrapping = false;
+                runOnUiThread(this::launchViewer);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (status != null) status.setText("ERROR: " + e.getMessage());
+                });
+            }
+        });
+    }
+
+    private void importZip(Uri uri) throws Exception {
+        deleteRecursive(webRoot);
+        if (!webRoot.mkdirs() && !webRoot.isDirectory()) throw new IOException("No se pudo crear almacenamiento interno");
+
+        int extracted = 0;
+        try (InputStream raw = getContentResolver().openInputStream(uri);
+             ZipInputStream zin = new ZipInputStream(new BufferedInputStream(raw))) {
+            ZipEntry e;
+            byte[] buf = new byte[1024 * 128];
+            while ((e = zin.getNextEntry()) != null) {
+                String name = e.getName().replace('\\','/');
+                int marker = name.indexOf("/fuentes/dist/");
+                String rel = null;
+                if (marker >= 0) rel = name.substring(marker + "/fuentes/dist/".length());
+                else if (name.startsWith("fuentes/dist/")) rel = name.substring("fuentes/dist/".length());
+                if (rel == null || rel.isEmpty()) { zin.closeEntry(); continue; }
+
+                File out = new File(webRoot, rel);
+                String rootPath = webRoot.getCanonicalPath() + File.separator;
+                if (!out.getCanonicalPath().startsWith(rootPath)) throw new IOException("ZIP inválido");
+
+                if (e.isDirectory()) {
+                    out.mkdirs();
+                } else {
+                    File p = out.getParentFile();
+                    if (p != null) p.mkdirs();
+                    try (OutputStream os = new BufferedOutputStream(new FileOutputStream(out))) {
+                        int n;
+                        while ((n = zin.read(buf)) > 0) os.write(buf, 0, n);
+                    }
+                    extracted++;
+                }
+                zin.closeEntry();
+            }
+        }
+        if (!new File(webRoot, "index.html").isFile()) throw new IOException("No encontré fuentes/dist/index.html dentro del ZIP");
+        if (extracted < 3) throw new IOException("Build web incompleta");
+    }
+
+    private void importZip(File zip) throws Exception {
+        deleteRecursive(webRoot);
+        if (!webRoot.mkdirs() && !webRoot.isDirectory()) throw new IOException("No se pudo crear almacenamiento interno");
+
+        int extracted = 0;
+        try (InputStream raw = new FileInputStream(zip);
+             ZipInputStream zin = new ZipInputStream(new BufferedInputStream(raw))) {
+            ZipEntry e;
+            byte[] buf = new byte[1024 * 128];
+            while ((e = zin.getNextEntry()) != null) {
+                String name = e.getName().replace('\\','/');
+                int m = name.indexOf("/fuentes/dist/");
+                String rel = null;
+                if (m >= 0) rel = name.substring(m + "/fuentes/dist/".length());
+                else if (name.startsWith("fuentes/dist/")) rel = name.substring("fuentes/dist/".length());
+                if (rel == null || rel.isEmpty()) { zin.closeEntry(); continue; }
+
+                File out = new File(webRoot, rel);
+                String rootPath = webRoot.getCanonicalPath() + File.separator;
+                if (!out.getCanonicalPath().startsWith(rootPath)) throw new IOException("ZIP inválido");
+                if (e.isDirectory()) out.mkdirs();
+                else {
+                    File p = out.getParentFile();
+                    if (p != null) p.mkdirs();
+                    try (OutputStream os = new BufferedOutputStream(new FileOutputStream(out))) {
+                        int n;
+                        while ((n = zin.read(buf)) > 0) os.write(buf,0,n);
+                    }
+                    extracted++;
+                }
+                zin.closeEntry();
+            }
+        }
+        if (!new File(webRoot,"index.html").isFile()) throw new IOException("No encontré fuentes/dist/index.html");
+        if (extracted < 3) throw new IOException("Build web incompleta");
+    }
+
+    private void launchViewer() {
+        if (server != null) server.stop();
+        try {
+            server = new LocalServer(webRoot);
+            server.start();
+        } catch (Exception e) {
+            showImporter();
+            status.setText("ERROR servidor local: " + e.getMessage());
+            return;
+        }
+
+        webView = new WebView(this);
+        webView.setBackgroundColor(Color.BLACK);
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setDatabaseEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setAllowContentAccess(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        s.setCacheMode(WebSettings.LOAD_DEFAULT);
+        s.setBuiltInZoomControls(false);
+        s.setDisplayZoomControls(false);
+        s.setUseWideViewPort(true);
+        s.setLoadWithOverviewMode(true);
+
+        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebViewClient(new WebViewClient());
+        setContentView(webView, new ViewGroup.LayoutParams(-1, -1));
+        webView.loadUrl("http://127.0.0.1:" + server.getPort() + "/");
+        webView.postDelayed(this::applyImmersive, 300);
     }
 
     @Override public void onBackPressed() {
-        if (view != null && view.goBack()) return;
-        super.onBackPressed();
+        if (webView != null && webView.canGoBack()) webView.goBack();
+        else super.onBackPressed();
     }
 
-    static final class Node {
-        String id,parent,name,kind,role;
-        int depth;
-        float x,y,z;
-        Node(String id,String parent,String kind,String role,int depth){
-            this.id=id; this.parent=parent; this.kind=kind; this.role=role; this.depth=depth;
-            this.name=".".equals(id)?"ARCHIE-DEMO":id.substring(id.lastIndexOf('/')+1);
+    @Override protected void onDestroy() {
+        if (server != null) server.stop();
+        if (webView != null) webView.destroy();
+        super.onDestroy();
+    }
+
+    static void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] cs = f.listFiles();
+            if (cs != null) for (File c : cs) deleteRecursive(c);
         }
+        f.delete();
     }
 
-    static final class LumenView extends View {
-        final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Paint text=new Paint(Paint.ANTI_ALIAS_FLAG);
-        final ArrayList<Node> nodes=new ArrayList<>();
-        final HashMap<String,Node> byId=new HashMap<>();
-        final ArrayList<RectF> buttons=new ArrayList<>();
-        final ArrayList<String> buttonIds=new ArrayList<>();
-        final ScaleGestureDetector scale;
-        float density;
-        float yaw=.55f,pitch=-.28f,zoom=1f;
-        float downX,downY,lastX,lastY;
-        boolean dragging=false;
-        String focus=".",selected=null;
-        long lastTap=0;
-        int profile=0;
-        String[] profiles={"RADIAL","ESPIRAL","ANILLOS","CARPETAS"};
-        Random rnd=new Random(7);
+    final class LocalServer {
+        private final File root;
+        private final ExecutorService pool = Executors.newCachedThreadPool();
+        private final Map<String,String> notes = new ConcurrentHashMap<>();
+        private final JSONArray demoNodes;
+        private final JSONArray demoInsights;
+        private volatile JSONArray allNodes;
+        private volatile JSONArray allInsights;
+        private volatile String currentRoot = "ARCHIE-DEMO";
+        private volatile boolean usingSaf = false;
+        private final Map<String,Uri> safFiles = new ConcurrentHashMap<>();
+        private volatile boolean running;
+        private ServerSocket socket;
+        private int port;
 
-        LumenView(Context c){
-            super(c);
-            density=getResources().getDisplayMetrics().density;
-            setBackgroundColor(Color.rgb(4,6,11));
-            text.setTypeface(Typeface.create("sans-serif",Typeface.NORMAL));
-            buildDemo();
-            layoutNodes();
-            scale=new ScaleGestureDetector(c,new ScaleGestureDetector.SimpleOnScaleGestureListener(){
-                @Override public boolean onScale(ScaleGestureDetector d){
-                    zoom=Math.max(.45f,Math.min(2.5f,zoom*d.getScaleFactor()));
-                    invalidate(); return true;
+        LocalServer(File root) throws Exception {
+            this.root = root;
+            this.demoNodes = buildNodes();
+            this.demoInsights = buildInsights(demoNodes);
+            this.allNodes = demoNodes;
+            this.allInsights = demoInsights;
+        }
+
+        int getPort() { return port; }
+
+        void start() throws Exception {
+            socket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+            port = socket.getLocalPort();
+            running = true;
+            pool.execute(() -> {
+                while (running) {
+                    try {
+                        Socket accepted = socket.accept();
+                        pool.execute(() -> handle(accepted));
+                    } catch (Exception e) {
+                        if (running) e.printStackTrace();
+                    }
                 }
             });
         }
 
-        float dp(float v){return v*density;}
-        int col(String s){
-            if("dir".equals(s)) return Color.rgb(41,196,230);
-            if(s.contains("Modelo")) return Color.rgb(239,107,168);
-            if(s.contains("Conocimiento")) return Color.rgb(242,164,201);
-            if(s.contains("Pruebas")) return Color.rgb(241,181,98);
-            if(s.contains("Config")) return Color.rgb(85,215,180);
-            if(s.contains("Seguridad")) return Color.rgb(83,215,182);
-            return Color.rgb(119,116,255);
+        void stop() {
+            running = false;
+            try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+            pool.shutdownNow();
         }
 
-        void add(String id,String parent,String kind,String role){
-            int depth=".".equals(id)?0:id.split("/").length;
-            Node n=new Node(id,parent,kind,role,depth); nodes.add(n); byId.put(id,n);
-        }
+        private void handle(Socket client) {
+            try (Socket c = client) {
+                c.setSoTimeout(10000);
+                BufferedInputStream in = new BufferedInputStream(c.getInputStream());
+                OutputStream out = new BufferedOutputStream(c.getOutputStream());
 
-        void buildDemo(){
-            add(".","","dir","Raíz");
-            String[] roots={"src","models","docs","tests","plugins","configs","data","assets"};
-            for(String r:roots)add(r,".","dir","Estructura");
-            String[][] dirs={
-              {"src","cortex"},{"src","iris"},{"src","sentry"},{"src","forge"},
-              {"src/iris","navigation"},{"src/iris","vision"},{"src/sentry","network"},{"src/sentry","devices"},
-              {"models","bonsai"},{"models/bonsai","experts"},{"models","iris"},{"models/iris","adapters"},
-              {"docs","architecture"},{"docs","research"},{"tests","unit"},{"tests","integration"},
-              {"plugins","iot"},{"plugins","vision"},{"plugins","automation"},
-              {"configs","profiles"},{"data","memory"},{"data","knowledge"},{"assets","materials"},{"assets","shaders"}
-            };
-            for(String[] d:dirs)add(d[0]+"/"+d[1],d[0],"dir","Estructura");
-            String[][] files={
-              {"src/main.cpp","src","Código"},{"src/cortex/cortex.cpp","src/cortex","Núcleo"},
-              {"src/cortex/router.cpp","src/cortex","Núcleo"},{"src/cortex/memory.cpp","src/cortex","Memoria"},
-              {"src/iris/navigation/navigation.cpp","src/iris/navigation","Percepción"},{"src/iris/navigation/field.cpp","src/iris/navigation","Percepción"},
-              {"src/iris/vision/vision.cpp","src/iris/vision","Percepción"},{"src/iris/vision/grounding.cpp","src/iris/vision","Percepción"},
-              {"src/sentry/network/network.rs","src/sentry/network","Seguridad"},{"src/sentry/network/router.rs","src/sentry/network","Seguridad"},
-              {"src/sentry/devices/iot.rs","src/sentry/devices","IoT"},{"src/forge/builder.py","src/forge","Código"},
-              {"src/forge/compiler.py","src/forge","Código"},{"docs/architecture/CORTEX.md","docs/architecture","Conocimiento"},
-              {"docs/architecture/IRIS.md","docs/architecture","Conocimiento"},{"docs/architecture/SENTRY.md","docs/architecture","Conocimiento"},
-              {"docs/research/navigation.md","docs/research","Conocimiento"},{"docs/research/clustering.md","docs/research","Conocimiento"},
-              {"configs/archie.json","configs","Configuración"},{"configs/profiles/performance.json","configs/profiles","Configuración"},
-              {"configs/profiles/research.json","configs/profiles","Configuración"},{"tests/unit/cortex.test.js","tests/unit","Pruebas"},
-              {"tests/unit/iris.test.js","tests/unit","Pruebas"},{"tests/integration/system.test.js","tests/integration","Pruebas"},
-              {"plugins/iot/plugin.json","plugins/iot","Integración"},{"plugins/vision/plugin.json","plugins/vision","Integración"},
-              {"plugins/automation/plugin.json","plugins/automation","Integración"},{"assets/shaders/node.vert","assets/shaders","Shader"},
-              {"assets/shaders/node.frag","assets/shaders","Shader"},{"assets/materials/materials.json","assets/materials","Material"}
-            };
-            for(String[] f:files)add(f[0],f[1],"file",f[2]);
-            for(int i=1;i<=32;i++)add(String.format(Locale.US,"models/bonsai/experts/expert-%02d.json",i),"models/bonsai/experts","file","Modelo");
-            for(int i=1;i<=18;i++){
-                String d=String.format(Locale.US,"models/iris/adapters/task-%02d",i);
-                add(d,"models/iris/adapters","dir","Estructura");
-                add(d+"/adapter.json",d,"file","Modelo");
-            }
-            for(int i=1;i<=30;i++)add(String.format(Locale.US,"data/memory/memory-%03d.md",i),"data/memory","file","Memoria");
-            for(int i=1;i<=30;i++)add(String.format(Locale.US,"data/knowledge/concept-%03d.txt",i),"data/knowledge","file","Conocimiento");
-        }
+                String requestLine = readLine(in);
+                if (requestLine == null || requestLine.isEmpty()) return;
+                String[] p = requestLine.split(" ");
+                if (p.length < 2) return;
+                String method = p[0];
+                String rawPath = p[1];
 
-        int hash(String s){
-            int h=0x811c9dc5;
-            for(int i=0;i<s.length();i++){h^=s.charAt(i); h*=0x01000193;}
-            return h;
-        }
-        float r01(String s,int salt){
-            int x=hash(s)+salt*0x9e3779b9;
-            x^=x<<13; x^=x>>>17; x^=x<<5;
-            return (x & 0x7fffffff)/(float)0x7fffffff;
-        }
-
-        void layoutNodes(){
-            for(int i=0;i<nodes.size();i++){
-                Node n=nodes.get(i);
-                if(".".equals(n.id)){n.x=n.y=n.z=0;continue;}
-                float a=r01(n.id,1)*(float)Math.PI*2f;
-                float b=(r01(n.id,2)-.5f)*(float)Math.PI;
-                float rr=70+n.depth*36+r01(n.id,3)*90;
-                if(profile==1){
-                    float t=i*.47f+n.depth*.8f;
-                    n.x=(float)Math.cos(t)*(55+n.depth*28);
-                    n.y=((i%17)-8)*12;
-                    n.z=(float)Math.sin(t)*(55+n.depth*28);
-                }else if(profile==2){
-                    float rad=60+n.depth*55;
-                    n.x=(float)Math.cos(a)*rad;
-                    n.y=(n.depth-2.5f)*42+(float)Math.sin(b)*25;
-                    n.z=(float)Math.sin(a)*rad;
-                }else if(profile==3){
-                    String[] gs={"src","models","docs","tests","plugins","configs","data","assets"};
-                    String g=n.id.contains("/")?n.id.substring(0,n.id.indexOf('/')):n.id;
-                    int gi=0; for(int k=0;k<gs.length;k++) if(gs[k].equals(g)) gi=k;
-                    float ga=gi/(float)gs.length*(float)Math.PI*2f;
-                    float cx=(float)Math.cos(ga)*180, cz=(float)Math.sin(ga)*180;
-                    n.x=cx+(float)Math.cos(a)*rr*.45f;
-                    n.y=(float)Math.sin(b)*rr*.55f;
-                    n.z=cz+(float)Math.sin(a)*rr*.45f;
-                }else{
-                    n.x=(float)(Math.cos(a)*Math.cos(b)*rr);
-                    n.y=(float)(Math.sin(b)*rr);
-                    n.z=(float)(Math.sin(a)*Math.cos(b)*rr);
-                }
-            }
-            invalidate();
-        }
-
-        boolean inFocus(Node n){
-            if(".".equals(focus)) return true;
-            return n.id.equals(focus)||n.id.startsWith(focus+"/");
-        }
-
-        @Override protected void onDraw(Canvas c){
-            super.onDraw(c);
-            int W=getWidth(),H=getHeight();
-            float top=dp(66), left=dp(210), foot=dp(26);
-            drawBackground(c,W,H);
-            drawTop(c,W,top);
-            drawSidebar(c,left,top,H-foot);
-            drawFooter(c,W,H,foot);
-
-            RectF stage=new RectF(left,top,W,H-foot);
-            c.save(); c.clipRect(stage);
-            drawGraph(c,stage);
-            c.restore();
-
-            if(selected!=null)drawInspector(c,W,H,top,foot);
-        }
-
-        void drawBackground(Canvas c,int W,int H){
-            RadialGradient g=new RadialGradient(W*.62f,H*.5f,Math.max(W,H)*.55f,
-                new int[]{Color.rgb(18,29,44),Color.rgb(7,11,18),Color.rgb(3,5,9)},
-                new float[]{0,.5f,1},Shader.TileMode.CLAMP);
-            p.setShader(g); c.drawRect(0,0,W,H,p); p.setShader(null);
-        }
-
-        void drawTop(Canvas c,int W,float top){
-            p.setColor(Color.rgb(8,12,19)); c.drawRect(0,0,W,top,p);
-            p.setColor(Color.rgb(28,37,51)); c.drawRect(0,top-dp(1),W,top,p);
-            p.setColor(Color.rgb(26,54,82)); c.drawRoundRect(dp(12),dp(10),dp(54),dp(52),dp(9),dp(9),p);
-            text.setColor(Color.WHITE); text.setTextSize(dp(22)); text.setTypeface(Typeface.DEFAULT_BOLD); c.drawText("A",dp(26),dp(39),text);
-            text.setTextSize(dp(19)); c.drawText("ARCHIE",dp(68),dp(31),text);
-            text.setTypeface(Typeface.DEFAULT); text.setColor(Color.rgb(93,106,126)); text.setTextSize(dp(8)); c.drawText("LUMENFIELD / V4 · ANDROID NATIVO",dp(68),dp(46),text);
-
-            buttons.clear();buttonIds.clear();
-            float x=W-dp(300);
-            drawButton(c,x,dp(12),dp(52),dp(38),"HOME","home");x+=dp(58);
-            drawButton(c,x,dp(12),dp(52),dp(38),"ATRÁS","back");x+=dp(58);
-            drawButton(c,x,dp(12),dp(72),dp(38),profiles[profile],"profile");x+=dp(78);
-            drawButton(c,x,dp(12),dp(52),dp(38),"RESET","reset");
-        }
-
-        void drawButton(Canvas c,float x,float y,float w,float h,String label,String id){
-            RectF r=new RectF(x,y,x+w,y+h);buttons.add(r);buttonIds.add(id);
-            p.setColor(Color.rgb(12,18,28));c.drawRoundRect(r,dp(6),dp(6),p);
-            p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(dp(1));p.setColor(Color.rgb(36,55,76));c.drawRoundRect(r,dp(6),dp(6),p);p.setStyle(Paint.Style.FILL);
-            text.setTextSize(dp(8));text.setColor(Color.rgb(120,160,185));text.setTypeface(Typeface.DEFAULT_BOLD);
-            float tw=text.measureText(label);c.drawText(label,x+(w-tw)/2,y+h/2+dp(3),text);
-        }
-
-        void drawSidebar(Canvas c,float left,float top,float bottom){
-            p.setColor(Color.rgb(7,11,18));c.drawRect(0,top,left,bottom,p);
-            p.setColor(Color.rgb(28,37,51));c.drawRect(left-dp(1),top,left,bottom,p);
-            text.setTypeface(Typeface.DEFAULT_BOLD);text.setTextSize(dp(8));text.setColor(Color.rgb(41,196,230));c.drawText("ORIGEN",dp(12),top+dp(22),text);
-            p.setColor(Color.rgb(10,20,30));c.drawRoundRect(dp(10),top+dp(32),left-dp(10),top+dp(82),dp(7),dp(7),p);
-            text.setColor(Color.WHITE);text.setTextSize(dp(11));c.drawText(focus.equals(".")?"ARCHIE-DEMO":trim(focus,20),dp(18),top+dp(52),text);
-            text.setColor(Color.rgb(80,98,120));text.setTextSize(dp(7));c.drawText("DEMO INTEGRADA · SIN ARCHIVOS EXTERNOS",dp(18),top+dp(68),text);
-
-            text.setTextSize(dp(8));text.setColor(Color.rgb(41,196,230));c.drawText("EXPLORADOR",dp(12),top+dp(108),text);
-            ArrayList<Node> list=new ArrayList<>();
-            for(Node n:nodes) if(n.parent.equals(focus)) list.add(n);
-            float y=top+dp(128);
-            for(int i=0;i<list.size()&&i<16;i++){
-                Node n=list.get(i);
-                p.setColor(n.id.equals(selected)?Color.rgb(15,30,43):Color.TRANSPARENT);
-                c.drawRoundRect(dp(8),y-dp(13),left-dp(8),y+dp(9),dp(5),dp(5),p);
-                p.setColor(col(n.kind.equals("dir")?"dir":n.role));c.drawCircle(dp(18),y-dp(3),dp(n.kind.equals("dir")?4:3),p);
-                text.setTextSize(dp(8));text.setColor(Color.rgb(145,160,182));text.setTypeface(Typeface.DEFAULT);
-                c.drawText(trim(n.name,25),dp(29),y,text); y+=dp(27);
-            }
-            if(list.isEmpty()){
-                text.setColor(Color.rgb(84,100,120)); text.setTextSize(dp(8)); c.drawText("Sin hijos directos",dp(16),y,text);
-            }
-        }
-
-        void drawFooter(Canvas c,int W,int H,float foot){
-            p.setColor(Color.rgb(6,9,14));c.drawRect(0,H-foot,W,H,p);
-            p.setColor(Color.rgb(28,37,51));c.drawRect(0,H-foot,W,H-foot+dp(1),p);
-            text.setTextSize(dp(7));text.setColor(Color.rgb(83,101,124));text.setTypeface(Typeface.DEFAULT_BOLD);
-            c.drawText("LISTO · ANDROID NATIVO · DEMO INTEGRADA",dp(12),H-dp(9),text);
-            String s=nodes.size()+" ELEMENTOS INDEXADOS";
-            c.drawText(s,W-dp(12)-text.measureText(s),H-dp(9),text);
-        }
-
-        static final class P3{float x,y,z,s;Node n;}
-        P3 project(Node n,RectF r){
-            float cy=(float)Math.cos(yaw),sy=(float)Math.sin(yaw),cp=(float)Math.cos(pitch),sp=(float)Math.sin(pitch);
-            float x1=n.x*cy-n.z*sy,z1=n.x*sy+n.z*cy,y1=n.y*cp-z1*sp,z2=n.y*sp+z1*cp;
-            float sc=650f/(720f+z2);
-            P3 q=new P3();q.x=r.centerX()+x1*sc*zoom;q.y=r.centerY()+y1*sc*zoom;q.z=z2;q.s=sc;q.n=n;return q;
-        }
-
-        void drawGraph(Canvas c,RectF r){
-            ArrayList<P3> ps=new ArrayList<>();
-            for(Node n:nodes)if(inFocus(n))ps.add(project(n,r));
-            HashMap<String,P3> mp=new HashMap<>();for(P3 q:ps)mp.put(q.n.id,q);
-            p.setStrokeWidth(dp(.7f));
-            for(P3 q:ps){
-                P3 par=mp.get(q.n.parent); if(par==null)continue;
-                p.setColor(Color.argb(80,50,96,125));c.drawLine(par.x,par.y,q.x,q.y,p);
-            }
-            Collections.sort(ps,(a,b)->Float.compare(b.z,a.z));
-            for(P3 q:ps){
-                Node n=q.n;float rad=dp((n.kind.equals("dir")?5.2f:3.5f)*Math.max(.6f,q.s));
-                p.setColor(col(n.kind.equals("dir")?"dir":n.role));
-                p.setShadowLayer(dp(n.id.equals(selected)?10:5),0,0,p.getColor());setLayerType(LAYER_TYPE_SOFTWARE,p);
-                if(n.kind.equals("dir"))c.drawRect(q.x-rad,q.y-rad,q.x+rad,q.y+rad,p);else c.drawCircle(q.x,q.y,rad,p);
-                p.clearShadowLayer();
-                if(n.id.equals(selected)){
-                    p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(dp(1.4f));p.setColor(Color.WHITE);c.drawCircle(q.x,q.y,rad+dp(5),p);p.setStyle(Paint.Style.FILL);
-                }
-                if(n.kind.equals("dir")&&n.depth<=2 || n.id.equals(selected)){
-                    text.setTextSize(dp(7));text.setColor(Color.rgb(140,157,181));text.setTypeface(Typeface.DEFAULT);
-                    c.drawText(trim(n.name,18),q.x+rad+dp(4),q.y+dp(2),text);
-                }
-            }
-        }
-
-        void drawInspector(Canvas c,int W,int H,float top,float foot){
-            Node n=byId.get(selected);if(n==null)return;
-            float width=dp(250),x=W-width,bottom=H-foot;
-            p.setColor(Color.argb(245,10,15,24));c.drawRect(x,top,W,bottom,p);
-            p.setColor(Color.rgb(35,50,68));c.drawRect(x,top,x+dp(1),bottom,p);
-            text.setTypeface(Typeface.DEFAULT_BOLD);text.setTextSize(dp(8));text.setColor(Color.rgb(75,91,111));c.drawText("INSPECTOR",x+dp(16),top+dp(24),text);
-            text.setTextSize(dp(15));text.setColor(Color.WHITE);c.drawText(trim(n.name,24),x+dp(16),top+dp(48),text);
-            text.setTypeface(Typeface.DEFAULT);text.setTextSize(dp(8));text.setColor(Color.rgb(101,118,141));c.drawText(trim(n.id,35),x+dp(16),top+dp(66),text);
-
-            info(c,x+dp(16),top+dp(88),"TIPO",n.kind.equals("dir")?"CARPETA":"ARCHIVO");
-            info(c,x+dp(128),top+dp(88),"PROFUNDIDAD",String.valueOf(n.depth));
-            info(c,x+dp(16),top+dp(135),"ROL",n.role);
-            info(c,x+dp(128),top+dp(135),"HIJOS",String.valueOf(childCount(n.id)));
-
-            if(n.kind.equals("dir")){
-                RectF enter=new RectF(x+dp(16),top+dp(190),W-dp(16),top+dp(228));buttons.add(enter);buttonIds.add("enter");
-                p.setColor(Color.rgb(11,31,43));c.drawRoundRect(enter,dp(6),dp(6),p);
-                text.setTextSize(dp(9));text.setColor(Color.rgb(76,215,241));text.setTypeface(Typeface.DEFAULT_BOLD);
-                c.drawText("ENTRAR EN CARPETA",enter.left+dp(18),enter.centerY()+dp(3),text);
-            }
-            text.setTextSize(dp(8));text.setColor(Color.rgb(80,96,118));c.drawText("TOCA EL MISMO NODO DOS VECES PARA ENTRAR",x+dp(16),bottom-dp(24),text);
-        }
-
-        void info(Canvas c,float x,float y,String k,String v){
-            text.setTypeface(Typeface.DEFAULT_BOLD);text.setTextSize(dp(7));text.setColor(Color.rgb(70,85,104));c.drawText(k,x,y,text);
-            text.setTextSize(dp(9));text.setColor(Color.rgb(200,214,231));c.drawText(trim(v,18),x,y+dp(17),text);
-        }
-
-        int childCount(String id){int k=0;for(Node n:nodes)if(n.parent.equals(id))k++;return k;}
-
-        String trim(String s,int m){return s.length()<=m?s:s.substring(0,Math.max(1,m-1))+"…";}
-
-        Node hit(float x,float y){
-            float top=dp(66),left=dp(210),foot=dp(26);RectF r=new RectF(left,top,getWidth(),getHeight()-foot);
-            Node best=null;float bd=99999;
-            for(Node n:nodes)if(inFocus(n)){
-                P3 q=project(n,r);float d=(float)Math.hypot(x-q.x,y-q.y);
-                float rr=dp(n.kind.equals("dir")?12:10);
-                if(d<rr&&d<bd){best=n;bd=d;}
-            }
-            return best;
-        }
-
-        @Override public boolean onTouchEvent(MotionEvent e){
-            scale.onTouchEvent(e);
-            if(scale.isInProgress())return true;
-            float x=e.getX(),y=e.getY();
-            switch(e.getActionMasked()){
-                case MotionEvent.ACTION_DOWN:
-                    downX=lastX=x;downY=lastY=y;dragging=false;return true;
-                case MotionEvent.ACTION_MOVE:
-                    float dx=x-lastX,dy=y-lastY;
-                    if(Math.abs(x-downX)+Math.abs(y-downY)>dp(5))dragging=true;
-                    if(x>dp(210)&&y>dp(66)&&x<getWidth()-dp(selected!=null?250:0)){
-                        yaw+=dx*.006f;pitch=Math.max(-1.3f,Math.min(1.3f,pitch+dy*.006f));invalidate();
+                int contentLength = 0;
+                String line;
+                while ((line = readLine(in)) != null && !line.isEmpty()) {
+                    int k = line.indexOf(':');
+                    if (k > 0 && line.substring(0,k).trim().equalsIgnoreCase("Content-Length")) {
+                        try { contentLength = Integer.parseInt(line.substring(k+1).trim()); } catch (Exception ignored) {}
                     }
-                    lastX=x;lastY=y;return true;
-                case MotionEvent.ACTION_UP:
-                    if(!dragging)handleTap(x,y);
-                    return true;
+                }
+                byte[] body = new byte[Math.max(0, contentLength)];
+                int off = 0;
+                while (off < body.length) {
+                    int n = in.read(body, off, body.length - off);
+                    if (n < 0) break;
+                    off += n;
+                }
+
+                URI uri = new URI("http://127.0.0.1" + rawPath);
+                String path = uri.getPath();
+                Map<String,String> q = query(uri.getRawQuery());
+
+                if (path.startsWith("/api/")) {
+                    String json = api(method, path, q, new String(body, 0, off, StandardCharsets.UTF_8));
+                    sendBytes(out, 200, "application/json; charset=utf-8", json.getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+
+                if (path.equals("/")) path = "/index.html";
+                File f = new File(root, path.substring(1));
+                String rootPath = root.getCanonicalPath() + File.separator;
+                if (!f.getCanonicalPath().startsWith(rootPath) || !f.isFile()) {
+                    sendBytes(out, 404, "text/plain; charset=utf-8", "Not found".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                sendFile(out, f, mime(f.getName()));
+            } catch (Exception e) {
+                try {
+                    OutputStream out = client.getOutputStream();
+                    sendBytes(out, 500, "text/plain; charset=utf-8", ("Server error: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
             }
-            return true;
         }
 
-        void handleTap(float x,float y){
-            for(int i=buttons.size()-1;i>=0;i--)if(buttons.get(i).contains(x,y)){action(buttonIds.get(i));return;}
-            float top=dp(66),left=dp(210);
-            if(x<left&&y>top){
-                ArrayList<Node> list=new ArrayList<>();for(Node n:nodes)if(n.parent.equals(focus))list.add(n);
-                int idx=(int)((y-(top+dp(115)))/dp(27));
-                if(idx>=0&&idx<list.size()){select(list.get(idx));return;}
+        private String api(String method, String path, Map<String,String> q, String body) throws Exception {
+            switch (path) {
+                case "/api/state":
+                    return new JSONObject()
+                            .put("errors",0).put("loaded",true)
+                            .put("name","ARCHIE Lumenfield V4 Android")
+                            .put("root",currentRoot)
+                            .put("total",allNodes.length())
+                            .put("truncated",false)
+                            .put("source",usingSaf ? "ANDROID SAF" : "DEMO ANDROID INTEGRADO")
+                            .toString();
+                case "/api/demo-location":
+                    return new JSONObject().put("path","ARCHIE-DEMO").put("label","Demo Android integrado").toString();
+                case "/api/pick":
+                    return pickAndroidFolder().toString();
+                case "/api/select":
+                    if (body != null && body.contains("ARCHIE-DEMO")) useDemo();
+                    return new JSONObject().put("root",currentRoot).put("total",allNodes.length()).put("errors",0).put("truncated",false).toString();
+                case "/api/refresh":
+                    if (usingSaf && selectedTreeUri != null) loadSafTree(selectedTreeUri);
+                    return new JSONObject().put("root",currentRoot).put("total",allNodes.length()).toString();
+                case "/api/graph":
+                    return graph(q.getOrDefault("focus","."), intVal(q.get("limit"), 2400)).toString();
+                case "/api/insights": {
+                    JSONObject obj = new JSONObject();
+                    obj.put("nodes", allInsights);
+                    obj.put("sampled", allInsights.length());
+                    obj.put("skipped", 0);
+                    obj.put("errors", 0);
+                    return obj.toString();
+                }
+                case "/api/preview": {
+                    String id = q.getOrDefault("id","");
+                    JSONObject node = findNode(id);
+                    if (node == null) throw new IOException("Archivo no encontrado");
+                    String text;
+                    if (usingSaf && safFiles.containsKey(id)) text = readSafText(safFiles.get(id));
+                    else text = "// Vista previa demo Android\n// " + id + "\n\n" + previewText(id);
+                    return new JSONObject().put("id",id).put("text",text).put("truncated",false).put("size",text.length()).toString();
+                }
+                case "/api/note": {
+                    String id = q.getOrDefault("id","");
+                    if ("PUT".equalsIgnoreCase(method)) {
+                        JSONObject o = body.isEmpty() ? new JSONObject() : new JSONObject(body);
+                        notes.put(o.optString("id",id), o.optString("text",""));
+                        return new JSONObject().put("saved",true).toString();
+                    }
+                    return new JSONObject().put("id",id).put("text",notes.getOrDefault(id,"")).toString();
+                }
+                case "/api/find": {
+                    String qq = q.getOrDefault("q","").toLowerCase(Locale.ROOT);
+                    JSONArray a = new JSONArray();
+                    for (int i=0;i<allNodes.length() && a.length()<24;i++) {
+                        JSONObject n = allNodes.getJSONObject(i);
+                        if (!qq.isEmpty() && n.optString("id").toLowerCase(Locale.ROOT).contains(qq)) a.put(n);
+                    }
+                    return a.toString();
+                }
+                default:
+                    if (path.startsWith("/api/profile") || path.startsWith("/api/profiles")) return new JSONArray().toString();
+                    return new JSONObject().put("ok",true).toString();
             }
-            Node n=hit(x,y);
-            if(n!=null){
-                long now=System.currentTimeMillis();
-                if(selected!=null&&selected.equals(n.id)&&now-lastTap<500&&n.kind.equals("dir"))navigate(n.id);
-                else select(n);
-                lastTap=now;
-            }else{selected=null;invalidate();}
         }
 
-        void select(Node n){selected=n.id;invalidate();}
-        void navigate(String id){Node n=byId.get(id);if(n==null||!n.kind.equals("dir"))return;focus=id;selected=null;invalidate();}
-        void action(String id){
-            if("home".equals(id)){focus=".";selected=null;}
-            else if("back".equals(id))goBack();
-            else if("reset".equals(id)){yaw=.55f;pitch=-.28f;zoom=1f;}
-            else if("profile".equals(id)){profile=(profile+1)%profiles.length;layoutNodes();}
-            else if("enter".equals(id)&&selected!=null)navigate(selected);
-            invalidate();
+        private JSONObject pickAndroidFolder() throws Exception {
+            folderPickCancelled = false;
+            folderPickLatch = new CountDownLatch(1);
+            runOnUiThread(() -> {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                startActivityForResult(i, PICK_FOLDER);
+            });
+            boolean ok = folderPickLatch.await(10, TimeUnit.MINUTES);
+            folderPickLatch = null;
+            if (!ok || folderPickCancelled || selectedTreeUri == null) {
+                return new JSONObject().put("path","").put("cancelled",true);
+            }
+            return new JSONObject().put("path","ANDROID-SAF").put("label",currentRoot);
         }
 
-        boolean goBack(){
-            if(selected!=null){selected=null;invalidate();return true;}
-            if(!".".equals(focus)){
-                Node n=byId.get(focus);focus=(n==null||n.parent==null||n.parent.isEmpty())?".":n.parent;invalidate();return true;
+        private void useDemo() throws Exception {
+            usingSaf = false;
+            currentRoot = "ARCHIE-DEMO";
+            allNodes = demoNodes;
+            allInsights = demoInsights;
+            safFiles.clear();
+        }
+
+        void loadSafTree(Uri treeUri) throws Exception {
+            JSONArray scanned = new JSONArray();
+            safFiles.clear();
+            ContentResolver cr = getContentResolver();
+            String rootDocId = DocumentsContract.getTreeDocumentId(treeUri);
+            Uri rootDoc = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootDocId);
+            String rootName = queryName(rootDoc);
+            if (rootName == null || rootName.isEmpty()) rootName = "ANDROID-FOLDER";
+            addNode(scanned, ".", rootName, "", "dir", 4096, System.currentTimeMillis(), 0);
+            scanChildren(treeUri, rootDocId, ".", scanned, 0, 36000);
+            if (scanned.length() <= 1) throw new IOException("La carpeta no contiene elementos legibles");
+            allNodes = scanned;
+            allInsights = buildInsights(scanned);
+            currentRoot = rootName;
+            usingSaf = true;
+        }
+
+        private void scanChildren(Uri treeUri, String parentDocId, String parentRel, JSONArray out, int depth, int max) throws Exception {
+            if (out.length() >= max || depth > 64) return;
+            Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId);
+            String[] projection = new String[]{
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED
+            };
+            try (Cursor cur = getContentResolver().query(childrenUri, projection, null, null, null)) {
+                if (cur == null) return;
+                while (cur.moveToNext() && out.length() < max) {
+                    String docId = cur.getString(0);
+                    String name = cur.getString(1);
+                    String mime = cur.getString(2);
+                    long size = cur.isNull(3) ? 0 : cur.getLong(3);
+                    long modified = cur.isNull(4) ? 0 : cur.getLong(4);
+                    boolean dir = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
+                    String id = ".".equals(parentRel) ? name : parentRel + "/" + name;
+                    addNode(out, id, name, parentRel, dir ? "dir" : "file", size, modified, id.split("/").length);
+                    Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
+                    if (!dir) safFiles.put(id, docUri);
+                    else scanChildren(treeUri, docId, id, out, depth + 1, max);
+                }
             }
-            return false;
+        }
+
+        private String queryName(Uri doc) {
+            try (Cursor c = getContentResolver().query(doc,
+                    new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+                if (c != null && c.moveToFirst()) return c.getString(0);
+            } catch (Exception ignored) {}
+            return null;
+        }
+
+        private String readSafText(Uri uri) throws Exception {
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                if (in == null) throw new IOException("No se pudo abrir archivo");
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n, total = 0;
+                while ((n = in.read(buf)) > 0 && total < 262144) {
+                    int take = Math.min(n, 262144 - total);
+                    out.write(buf,0,take);
+                    total += take;
+                }
+                return new String(out.toByteArray(), StandardCharsets.UTF_8);
+            }
+        }
+
+        private JSONObject graph(String focus, int limit) throws Exception {
+            limit = Math.max(1, Math.min(36000, limit));
+            Set<String> include = new LinkedHashSet<>();
+            Map<String,JSONObject> byId = new HashMap<>();
+            Map<String,List<JSONObject>> children = new HashMap<>();
+            for (int i=0;i<allNodes.length();i++) {
+                JSONObject n = allNodes.getJSONObject(i);
+                byId.put(n.getString("id"), n);
+                children.computeIfAbsent(n.optString("parent",""), k -> new ArrayList<>()).add(n);
+            }
+            if (!byId.containsKey(focus)) focus = ".";
+            List<String> chain = new ArrayList<>();
+            String at = focus;
+            while (at != null && !at.isEmpty()) {
+                chain.add(at);
+                if (".".equals(at)) break;
+                JSONObject n = byId.get(at);
+                at = n == null ? "." : n.optString("parent",".");
+            }
+            Collections.reverse(chain);
+            include.addAll(chain);
+            ArrayDeque<String> queue = new ArrayDeque<>();
+            queue.add(focus);
+            while (!queue.isEmpty() && include.size()<limit) {
+                String cur = queue.removeFirst();
+                for (JSONObject n : children.getOrDefault(cur, Collections.emptyList())) {
+                    String id = n.getString("id");
+                    if (include.add(id)) queue.addLast(id);
+                    if (include.size()>=limit) break;
+                }
+            }
+            JSONArray nodes = new JSONArray();
+            JSONArray links = new JSONArray();
+            for (String id : include) {
+                JSONObject n = byId.get(id);
+                if (n != null) nodes.put(n);
+            }
+            for (String id : include) {
+                if (".".equals(id)) continue;
+                JSONObject n = byId.get(id);
+                if (n != null && include.contains(n.optString("parent"))) {
+                    links.put(new JSONObject().put("source",n.optString("parent")).put("target",id));
+                }
+            }
+            return new JSONObject()
+                    .put("nodes",nodes).put("links",links)
+                    .put("total",allNodes.length()).put("focus",focus)
+                    .put("omitted",include.size()<allNodes.length())
+                    .put("errors",0).put("truncated",false);
+        }
+
+        private JSONObject findNode(String id) throws Exception {
+            for (int i=0;i<allNodes.length();i++) {
+                JSONObject n = allNodes.getJSONObject(i);
+                if (id.equals(n.optString("id"))) return n;
+            }
+            return null;
+        }
+
+        private static JSONArray buildNodes() throws Exception {
+            JSONArray a = new JSONArray();
+            long now = System.currentTimeMillis();
+            addNode(a, ".", "ARCHIE-DEMO", "", "dir", 4096, now, 0);
+
+            String[] roots = {"src","models","docs","tests","plugins","configs","data","assets"};
+            for (String r : roots) addNode(a,r,r,".","dir",4096,now,1);
+
+            String[][] dirs = {
+                    {"src","cortex"},{"src","iris"},{"src","sentry"},{"src","forge"},
+                    {"src/iris","navigation"},{"src/iris","vision"},{"src/sentry","network"},{"src/sentry","devices"},
+                    {"models","bonsai"},{"models","iris"},{"models/bonsai","experts"},{"models/iris","adapters"},
+                    {"docs","architecture"},{"docs","research"},{"tests","unit"},{"tests","integration"},
+                    {"plugins","iot"},{"plugins","vision"},{"plugins","automation"},
+                    {"configs","profiles"},{"data","memory"},{"data","knowledge"},{"assets","materials"},{"assets","shaders"}
+            };
+            for (String[] d : dirs) {
+                String id = d[0] + "/" + d[1];
+                int depth = id.split("/").length;
+                addNode(a,id,d[1],d[0],"dir",4096,now,depth);
+            }
+
+            String[][] files = {
+                    {"src/main.cpp","src"},{"src/cortex/cortex.cpp","src/cortex"},{"src/cortex/router.cpp","src/cortex"},{"src/cortex/memory.cpp","src/cortex"},
+                    {"src/iris/navigation/navigation.cpp","src/iris/navigation"},{"src/iris/navigation/field.cpp","src/iris/navigation"},{"src/iris/vision/vision.cpp","src/iris/vision"},{"src/iris/vision/grounding.cpp","src/iris/vision"},
+                    {"src/sentry/network/network.rs","src/sentry/network"},{"src/sentry/network/router.rs","src/sentry/network"},{"src/sentry/devices/iot.rs","src/sentry/devices"},
+                    {"src/forge/builder.py","src/forge"},{"src/forge/compiler.py","src/forge"},
+                    {"docs/architecture/CORTEX.md","docs/architecture"},{"docs/architecture/IRIS.md","docs/architecture"},{"docs/architecture/SENTRY.md","docs/architecture"},
+                    {"docs/research/navigation.md","docs/research"},{"docs/research/clustering.md","docs/research"},
+                    {"configs/archie.json","configs"},{"configs/profiles/performance.json","configs/profiles"},{"configs/profiles/research.json","configs/profiles"},
+                    {"tests/unit/cortex.test.js","tests/unit"},{"tests/unit/iris.test.js","tests/unit"},{"tests/integration/system.test.js","tests/integration"},
+                    {"plugins/iot/plugin.json","plugins/iot"},{"plugins/vision/plugin.json","plugins/vision"},{"plugins/automation/plugin.json","plugins/automation"},
+                    {"assets/shaders/node.vert","assets/shaders"},{"assets/shaders/node.frag","assets/shaders"},{"assets/materials/materials.json","assets/materials"}
+            };
+            for (String[] f : files) addNode(a,f[0],baseName(f[0]),f[1],"file",800 + f[0].length()*31,now,f[0].split("/").length);
+
+            for (int i=1;i<=32;i++) {
+                String id=String.format(Locale.US,"models/bonsai/experts/expert-%02d.json",i);
+                addNode(a,id,baseName(id),"models/bonsai/experts","file",1400+i*23,now,4);
+            }
+            for (int i=1;i<=18;i++) {
+                String dir=String.format(Locale.US,"models/iris/adapters/task-%02d",i);
+                addNode(a,dir,baseName(dir),"models/iris/adapters","dir",4096,now,4);
+                String id=dir+"/adapter.json";
+                addNode(a,id,"adapter.json",dir,"file",1100+i*37,now,5);
+            }
+            for (int i=1;i<=30;i++) {
+                String id=String.format(Locale.US,"data/memory/memory-%03d.md",i);
+                addNode(a,id,baseName(id),"data/memory","file",600+i*19,now,3);
+            }
+            for (int i=1;i<=30;i++) {
+                String id=String.format(Locale.US,"data/knowledge/concept-%03d.txt",i);
+                addNode(a,id,baseName(id),"data/knowledge","file",500+i*17,now,3);
+            }
+            return a;
+        }
+
+        private static JSONArray buildInsights(JSONArray nodes) throws Exception {
+            JSONArray out = new JSONArray();
+            for (int i=0;i<nodes.length();i++) {
+                JSONObject n = nodes.getJSONObject(i);
+                String id = n.getString("id");
+                String role = role(id, n.optString("kind"));
+                JSONArray terms = new JSONArray();
+                for (String t : (id + " " + role).toLowerCase(Locale.ROOT).split("[^a-z0-9_]+")) {
+                    if (t.length()>=4 && terms.length()<8) terms.put(t);
+                }
+                JSONArray refs = new JSONArray();
+                if (id.contains("iris") && !"src/cortex/router.cpp".equals(id)) refs.put("src/cortex/router.cpp");
+                if (id.contains("sentry")) refs.put("src/cortex/cortex.cpp");
+                out.put(new JSONObject()
+                        .put("id",id).put("role",role).put("terms",terms)
+                        .put("headings",new JSONArray()).put("references",refs)
+                        .put("sampled","file".equals(n.optString("kind"))));
+            }
+            return out;
+        }
+
+        private static String role(String id, String kind) {
+            if ("dir".equals(kind)) return "Estructura";
+            String x=id.toLowerCase(Locale.ROOT);
+            if (x.contains("test")) return "Pruebas";
+            if (x.contains("docs") || x.endsWith(".md")) return "Conocimiento";
+            if (x.contains("config") || x.endsWith(".json")) return "Configuración";
+            if (x.contains("iris") || x.contains("vision")) return "Percepción";
+            if (x.contains("sentry") || x.contains("network")) return "Seguridad";
+            if (x.contains("cortex")) return "Núcleo";
+            if (x.contains("plugin")) return "Integración";
+            return "Código";
+        }
+
+        private static void addNode(JSONArray a, String id, String name, String parent, String kind, long size, long modified, int depth) throws Exception {
+            a.put(new JSONObject()
+                    .put("id",id).put("name",name).put("parent",parent)
+                    .put("kind",kind).put("size",size).put("modified",modified).put("depth",depth));
+        }
+
+        private static String previewText(String id) {
+            if (id.endsWith(".json")) return "{\n  \"demo\": true,\n  \"source\": \"ARCHIE Android\"\n}";
+            if (id.endsWith(".md")) return "# " + baseName(id) + "\n\nARCHIE Lumenfield Android demo.";
+            if (id.endsWith(".rs")) return "pub fn demo() { /* Sentry / Rust */ }";
+            if (id.endsWith(".py")) return "def demo():\n    return 'ARCHIE'";
+            if (id.endsWith(".cpp") || id.endsWith(".vert") || id.endsWith(".frag")) return "// ARCHIE Lumenfield demo\nvoid main() {}";
+            return "ARCHIE Lumenfield demo node";
+        }
+
+        private static String baseName(String p) {
+            int i=p.lastIndexOf('/');
+            return i<0?p:p.substring(i+1);
+        }
+
+        private static Map<String,String> query(String raw) throws Exception {
+            Map<String,String> m=new HashMap<>();
+            if (raw==null || raw.isEmpty()) return m;
+            for (String part:raw.split("&")) {
+                int k=part.indexOf('=');
+                String a=k<0?part:part.substring(0,k);
+                String b=k<0?"":part.substring(k+1);
+                m.put(URLDecoder.decode(a,"UTF-8"),URLDecoder.decode(b,"UTF-8"));
+            }
+            return m;
+        }
+
+        private static int intVal(String s, int d) {
+            try { return Integer.parseInt(s); } catch(Exception e) { return d; }
+        }
+
+        private static String readLine(InputStream in) throws IOException {
+            ByteArrayOutputStream b=new ByteArrayOutputStream();
+            int prev=-1, cur;
+            while ((cur=in.read())!=-1) {
+                if (prev=='\r' && cur=='\n') break;
+                if (prev!=-1) b.write(prev);
+                prev=cur;
+                if (b.size()>32768) throw new IOException("Header demasiado grande");
+            }
+            if (cur==-1 && prev!=-1) b.write(prev);
+            return b.toString("UTF-8");
+        }
+
+        private static void sendBytes(OutputStream out, int code, String type, byte[] data) throws IOException {
+            String h="HTTP/1.1 "+code+" "+(code==200?"OK":"ERROR")+"\r\n"+
+                    "Content-Type: "+type+"\r\n"+
+                    "Content-Length: "+data.length+"\r\n"+
+                    "Cache-Control: no-cache\r\n"+
+                    "Connection: close\r\n\r\n";
+            out.write(h.getBytes(StandardCharsets.UTF_8));
+            out.write(data);
+            out.flush();
+        }
+
+        private static void sendFile(OutputStream out, File f, String type) throws IOException {
+            String h="HTTP/1.1 200 OK\r\n"+
+                    "Content-Type: "+type+"\r\n"+
+                    "Content-Length: "+f.length()+"\r\n"+
+                    "Cache-Control: no-cache\r\n"+
+                    "Connection: close\r\n\r\n";
+            out.write(h.getBytes(StandardCharsets.UTF_8));
+            try (InputStream in=new BufferedInputStream(new FileInputStream(f))) {
+                byte[] buf=new byte[128*1024]; int n;
+                while((n=in.read(buf))>0) out.write(buf,0,n);
+            }
+            out.flush();
+        }
+
+        private static String mime(String name) {
+            String n=name.toLowerCase(Locale.ROOT);
+            if (n.endsWith(".html")) return "text/html; charset=utf-8";
+            if (n.endsWith(".js") || n.endsWith(".mjs")) return "text/javascript; charset=utf-8";
+            if (n.endsWith(".css")) return "text/css; charset=utf-8";
+            if (n.endsWith(".json")) return "application/json; charset=utf-8";
+            if (n.endsWith(".png")) return "image/png";
+            if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+            if (n.endsWith(".webp")) return "image/webp";
+            if (n.endsWith(".svg")) return "image/svg+xml";
+            if (n.endsWith(".woff2")) return "font/woff2";
+            if (n.endsWith(".wasm")) return "application/wasm";
+            return "application/octet-stream";
         }
     }
 }
