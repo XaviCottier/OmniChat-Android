@@ -8,8 +8,8 @@ android {
         applicationId 'com.lumenfield.viewer'
         minSdk 26
         targetSdk 35
-        versionCode 5
-        versionName '4.2-original-android'
+        versionCode 6
+        versionName '4.3-original-android'
     }
     buildTypes {
         release { minifyEnabled false }
