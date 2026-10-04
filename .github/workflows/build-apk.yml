@@ -26,6 +26,6 @@ jobs:
         run: gradle --no-daemon --stacktrace :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: ARCHIE-Lumenfield-V4-Android-Demo
+          name: ARCHIE-Lumenfield-V4-Android-Standalone
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
