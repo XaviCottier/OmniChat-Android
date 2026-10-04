@@ -29,9 +29,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          TAG="lumenfield-v4-original-android-v4"
+          TAG="lumenfield-v4-original-android-v5"
           gh release delete "$TAG" --cleanup-tag -y >/dev/null 2>&1 || true
-          gh release create "$TAG"             app/build/outputs/apk/debug/app-debug.apk#ARCHIE-Lumenfield-V4-Original-Android.apk             --title "ARCHIE Lumenfield V4 Original Android"             --notes "Android wrapper for the original Lumenfield V4 frontend. Automatically imports etapa-02-navegacion.zip from Downloads, loads integrated demo by default, supports Android SAF folder selection, and uses immersive mode."             --target "${GITHUB_SHA}"
+          gh release create "$TAG"             app/build/outputs/apk/debug/app-debug.apk#ARCHIE-Lumenfield-V4-Original-Android.apk             --title "ARCHIE Lumenfield V4 Original Android v5"             --notes "Android wrapper for the original Lumenfield V4 frontend. Automatically imports etapa-02-navegacion.zip from Downloads, loads integrated demo by default, supports Android SAF folder selection, and uses immersive mode."             --target "${GITHUB_SHA}"
       - uses: actions/upload-artifact@v4
         with:
           name: ARCHIE-Lumenfield-V4-Original-Android
