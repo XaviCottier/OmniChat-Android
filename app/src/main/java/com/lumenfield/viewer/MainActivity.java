@@ -53,15 +53,77 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        webRoot = new File(getFilesDir(), "lumenfield-v4-original-v5");
-        applyImmersive();
-        File index = new File(webRoot, "index.html");
-        if (index.isFile()) {
-            launchViewer();
-        } else {
-            bootstrapping = true;
-            beginAutomaticBootstrap();
+        try {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            webRoot = new File(getFilesDir(), "lumenfield-v4-original-v6");
+            File index = new File(webRoot, "index.html");
+
+            // Always draw a real Android view first. This prevents a blank/crashed-looking launch.
+            if (index.isFile()) {
+                showStartingScreen("Abriendo interfaz V4 original…");
+                getWindow().getDecorView().postDelayed(() -> {
+                    try { launchViewer(); } catch (Throwable t) { showFatal("launchViewer", t); }
+                }, 150);
+            } else {
+                bootstrapping = true;
+                beginAutomaticBootstrap();
+            }
+            getWindow().getDecorView().postDelayed(this::applyImmersive, 350);
+        } catch (Throwable t) {
+            showFatal("onCreate", t);
+        }
+    }
+
+    private void showStartingScreen(String message) {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(android.view.Gravity.CENTER);
+        root.setPadding(40,40,40,40);
+        root.setBackgroundColor(Color.rgb(7,10,16));
+        TextView title = new TextView(this);
+        title.setText("ARCHIE LUMENFIELD V4");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(24);
+        title.setGravity(android.view.Gravity.CENTER);
+        TextView msg = new TextView(this);
+        msg.setText("\n" + message);
+        msg.setTextColor(Color.rgb(80,220,190));
+        msg.setTextSize(14);
+        msg.setGravity(android.view.Gravity.CENTER);
+        root.addView(title,new LinearLayout.LayoutParams(-1,-2));
+        root.addView(msg,new LinearLayout.LayoutParams(-1,-2));
+        setContentView(root);
+    }
+
+    private void showFatal(String stage, Throwable t) {
+        try {
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setPadding(32,32,32,32);
+            root.setBackgroundColor(Color.rgb(15,5,8));
+
+            TextView title = new TextView(this);
+            title.setText("ARCHIE LUMENFIELD V4 — ERROR DE ARRANQUE");
+            title.setTextColor(Color.rgb(255,140,150));
+            title.setTextSize(20);
+
+            TextView msg = new TextView(this);
+            StringWriter sw = new StringWriter();
+            t.printStackTrace(new PrintWriter(sw));
+            msg.setText("\nEtapa: " + stage + "\n\n" + sw.toString());
+            msg.setTextColor(Color.WHITE);
+            msg.setTextSize(11);
+            msg.setTextIsSelectable(true);
+
+            root.addView(title,new LinearLayout.LayoutParams(-1,-2));
+            root.addView(msg,new LinearLayout.LayoutParams(-1,-1));
+            setContentView(root);
+        } catch (Throwable ignored) {
+            TextView fallback = new TextView(this);
+            fallback.setText("ARCHIE ERROR: " + stage + " — " + t);
+            fallback.setTextColor(Color.WHITE);
+            fallback.setBackgroundColor(Color.BLACK);
+            setContentView(fallback);
         }
     }
 
@@ -95,11 +157,15 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        applyImmersive();
-        if (bootstrapping && !new File(webRoot, "index.html").isFile()) {
-            if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
-                startAutomaticImport();
+        try {
+            if (webRoot != null && bootstrapping && !new File(webRoot, "index.html").isFile()) {
+                if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                    startAutomaticImport();
+                }
             }
+            getWindow().getDecorView().postDelayed(this::applyImmersive, 250);
+        } catch (Throwable t) {
+            showFatal("onResume", t);
         }
     }
 
